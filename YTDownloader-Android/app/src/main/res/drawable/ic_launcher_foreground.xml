@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft long shadow behind emblem -->
+    <path
+        android:pathData="M34,62 L74,36 L108,70 L108,108 L70,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="46"
+                android:startY="48"
+                android:endX="94"
+                android:endY="96"
+                android:type="linear">
+                <item android:color="#40000000" android:offset="0.0" />
+                <item android:color="#00000000" android:offset="1.0" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Rounded media screen badge (top half: y=27..59, x=28..80) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M36,27 L72,27 A8,8 0 0,1 80,35 L80,51 A8,8 0 0,1 72,59 L60,59 L60,47 L48,47 L48,59 L36,59 A8,8 0 0,1 28,51 L28,35 A8,8 0 0,1 36,27 Z" />
+
+    <!-- Play triangle inside top screen (crimson) -->
+    <path
+        android:fillColor="#FFD11119"
+        android:pathData="M49,34.5 L49,47.5 L61.5,41 Z" />
+
+    <!-- Bold download arrow shaft + chevron head (y=49..71) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M50,49 L58,49 L58,61 L66.5,61 L54,73.5 L41.5,61 L50,61 Z" />
+
+    <!-- Download tray base bar with rounded ends (y=75..80, x=33..75) -->
+    <path
+        android:fillColor="#F2FFFFFF"
+        android:pathData="M35.5,75.5 L72.5,75.5 A2.5,2.5 0 0,1 75,78 A2.5,2.5 0 0,1 72.5,80.5 L35.5,80.5 A2.5,2.5 0 0,1 33,78 A2.5,2.5 0 0,1 35.5,75.5 Z" />
+</vector>
