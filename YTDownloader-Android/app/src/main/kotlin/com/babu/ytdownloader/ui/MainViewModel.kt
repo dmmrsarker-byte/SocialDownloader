@@ -32,6 +32,7 @@ import kotlinx.coroutines.withContext
 
 data class HomeState(
   val url: String = "",
+  val batchUrls: List<String> = emptyList(),
   val customTitle: String = "",
   val loading: Boolean = false,
   val error: String? = null,
@@ -44,6 +45,10 @@ data class HomeState(
   val embedCoverArt: Boolean = true,
   /** Prefer extracting the full playlist/mix when a link has both v= and list=. */
   val preferPlaylist: Boolean = false,
+  /** Search/filter query inside a loaded playlist. */
+  val playlistQuery: String = "",
+  /** Prefix downloaded playlist tracks with "01 - ", "02 - ", etc. */
+  val numberPlaylistTracks: Boolean = true,
   /** Indexes of selected playlist entries. */
   val selected: Set<Int> = emptySet(),
 )
@@ -71,11 +76,12 @@ class MainViewModel : ViewModel() {
    */
   fun onUrlChange(value: String) {
     val prevUrl = _home.value.url
-    _home.update { it.copy(url = value, error = null) }
+    val allLinks = extractAllUrls(value)
+    _home.update { it.copy(url = value, batchUrls = allLinks, error = null) }
 
     pasteDebounceJob?.cancel()
-    val detected = extractUrl(value)
-    if (detected != null && detected != prevUrl && "/" in detected.substringAfter("://")) {
+    val detected = allLinks.firstOrNull() ?: extractUrl(value)
+    if (allLinks.size <= 1 && detected != null && detected != prevUrl && "/" in detected.substringAfter("://")) {
       pasteDebounceJob = viewModelScope.launch {
         delay(300)
         if (_home.value.url == value && _home.value.info?.url != detected) {
@@ -138,6 +144,7 @@ class MainViewModel : ViewModel() {
             audioFormat = AppSettings.audioFormat.value,
             selected = info.entries.indices.toSet(),
             preferPlaylist = info.isPlaylist,
+            playlistQuery = "",
           )
         }
         if (autoStart && (!info.isPlaylist || info.entries.size in 1..50)) {
@@ -167,11 +174,12 @@ class MainViewModel : ViewModel() {
     val info = s.info ?: return
     val thumbUrl = info.thumbnail ?: info.entries.firstOrNull()?.thumbnail ?: return
     val title = s.customTitle.trim().ifEmpty { info.title }
+    val cropSquare = s.type == MediaType.AUDIO || info.isAudioCentric
     viewModelScope.launch {
       try {
         val saved = withContext(Dispatchers.IO) {
           val coversDir = File(AppSettings.rootDir, "Covers")
-          NewPipeEngine.downloadCoverArt(thumbUrl, title, coversDir)
+          NewPipeEngine.downloadCoverArt(thumbUrl, title, coversDir, cropSquare = cropSquare)
         }
         onSaved(saved.absolutePath)
       } catch (t: Throwable) {
@@ -180,10 +188,25 @@ class MainViewModel : ViewModel() {
     }
   }
 
+  /** Enqueues all links pasted in a multi-link batch. */
+  @Synchronized
+  fun enqueueBatchUrls(): Int {
+    val s = _home.value
+    val urls = s.batchUrls.ifEmpty { listOfNotNull(extractUrl(s.url)) }
+    if (urls.isEmpty()) return 0
+    for (u in urls) {
+      val itemType = if (isAudioCentricUrl(u)) MediaType.AUDIO else s.type
+      DownloadManager.enqueueDirectFromLink(url = u, customTitle = null, type = itemType)
+    }
+    _home.value = HomeState()
+    return urls.size
+  }
+
   /** Enqueues a direct download from the currently entered URL (even if initial fetch failed). */
   @Synchronized
   fun directDownloadFromCurrentUrl(): Int {
     val s = _home.value
+    if (s.batchUrls.size > 1) return enqueueBatchUrls()
     val url = extractUrl(s.url) ?: return 0
     val custom = s.customTitle.trim().takeIf { it.isNotEmpty() }
     DownloadManager.enqueueDirectFromLink(url = url, customTitle = custom, type = s.type)
@@ -203,6 +226,8 @@ class MainViewModel : ViewModel() {
   fun setHeight(height: Int?) = _home.update { it.copy(height = height) }
   fun setAudioFormat(format: AudioFormat) = _home.update { it.copy(audioFormat = format) }
   fun setEmbedCoverArt(enabled: Boolean) = _home.update { it.copy(embedCoverArt = enabled) }
+  fun setPlaylistQuery(query: String) = _home.update { it.copy(playlistQuery = query) }
+  fun setNumberPlaylistTracks(enabled: Boolean) = _home.update { it.copy(numberPlaylistTracks = enabled) }
 
   fun toggleEntry(index: Int) = _home.update {
     it.copy(selected = if (index in it.selected) it.selected - index else it.selected + index)
@@ -210,6 +235,47 @@ class MainViewModel : ViewModel() {
 
   fun selectAll(all: Boolean) = _home.update {
     it.copy(selected = if (all) it.info?.entries?.indices?.toSet().orEmpty() else emptySet())
+  }
+
+  fun invertPlaylistSelection() = _home.update { s ->
+    val allIndices = s.info?.entries?.indices?.toSet().orEmpty()
+    s.copy(selected = allIndices - s.selected)
+  }
+
+  private fun formatNumberedTrackTitle(index: Int, rawTitle: String, enabled: Boolean): String {
+    if (!enabled) return rawTitle
+    if (Regex("""^\d{1,3}[\s._-]+""").containsMatchIn(rawTitle)) return rawTitle
+    return "%02d - %s".format(index + 1, rawTitle)
+  }
+
+  /** Immediately queues a single track from the currently loaded playlist without clearing the playlist view. */
+  @Synchronized
+  fun downloadSinglePlaylistEntry(index: Int): Int {
+    val s = _home.value
+    val info = s.info ?: return 0
+    val e = info.entries.getOrNull(index) ?: return 0
+    val playlistFolderName = s.customTitle.trim().takeIf { it.isNotEmpty() } ?: info.title
+    val trackTitle = formatNumberedTrackTitle(index, e.title, s.numberPlaylistTracks)
+    val thumb = e.thumbnail ?: info.thumbnail
+    val uploader = e.uploader ?: info.uploader
+    val task = DownloadTask(
+      url = e.url,
+      title = trackTitle,
+      thumbnail = thumb,
+      uploader = uploader,
+      playlist = playlistFolderName,
+      options = DownloadOptions(
+        type = s.type,
+        videoHeight = s.height,
+        audioFormat = s.audioFormat,
+        customTitle = trackTitle,
+        embedCoverArt = s.embedCoverArt,
+        thumbnailUrl = thumb,
+        artistName = uploader,
+        albumName = playlistFolderName,
+      ),
+    )
+    return DownloadManager.enqueue(listOf(task))
   }
 
   /**
@@ -238,16 +304,19 @@ class MainViewModel : ViewModel() {
       embedCoverArt = s.embedCoverArt,
     )
     val tasks = if (info.isPlaylist) {
-      info.entries.filterIndexed { i, _ -> i in s.selected }.map { e ->
+      info.entries.mapIndexedNotNull { i, e ->
+        if (i !in s.selected) return@mapIndexedNotNull null
         val thumb = e.thumbnail ?: info.thumbnail
         val uploader = e.uploader ?: info.uploader
+        val trackTitle = formatNumberedTrackTitle(i, e.title, s.numberPlaylistTracks)
         DownloadTask(
           url = e.url,
-          title = e.title,
+          title = trackTitle,
           thumbnail = thumb,
           uploader = uploader,
           playlist = playlistFolderName,
           options = baseOptions.copy(
+            customTitle = trackTitle,
             thumbnailUrl = thumb,
             artistName = uploader,
             albumName = playlistFolderName,

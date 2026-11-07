@@ -370,8 +370,8 @@ namespace YTDownloaderSetup
                 {
                     if (key != null)
                     {
-                        key.SetValue("DisplayName", "Social Downloader v2.4");
-                        key.SetValue("DisplayVersion", "2.4.0");
+                        key.SetValue("DisplayName", "Social Downloader v2.5");
+                        key.SetValue("DisplayVersion", "2.5.0");
                         key.SetValue("Publisher", "Bistar Digital");
                         key.SetValue("DisplayIcon", File.Exists(icoPath) ? icoPath : exePath);
                         key.SetValue("InstallLocation", targetDir);
@@ -412,7 +412,7 @@ namespace YTDownloaderSetup
 
         public SetupForm()
         {
-            Text = "Social Downloader v2.4 Setup — Installer";
+            Text = "Social Downloader v2.5 Setup — Installer";
             Size = new Size(640, 530);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -459,7 +459,7 @@ namespace YTDownloaderSetup
 
             Label lblTitle = new Label
             {
-                Text = "Social Downloader v2.4 Setup",
+                Text = "Social Downloader v2.5 Setup",
                 Font = new Font("Segoe UI Semibold", 15f, FontStyle.Bold),
                 ForeColor = TextPrimary,
                 Location = new Point(92, 16),

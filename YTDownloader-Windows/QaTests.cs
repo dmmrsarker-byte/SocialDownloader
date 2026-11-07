@@ -38,6 +38,9 @@ namespace YTDownloaderWindows
                 TestV24PlaylistAndMusicCoverSupport();
                 results.Add("PASS: TestV24PlaylistAndMusicCoverSupport");
 
+                TestV25BatchLinksTrackNumberingAndSpotifyCover();
+                results.Add("PASS: TestV25BatchLinksTrackNumberingAndSpotifyCover");
+
                 File.WriteAllLines(
                     Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "qa_test_results.txt"),
                     results);
@@ -296,6 +299,66 @@ namespace YTDownloaderWindows
                 AssertEqual(2, bcMeta.Entries.Count, "Bandcamp album track count");
                 AssertEqual("01. Sunrise", bcMeta.Entries[0].Title, "Bandcamp track 1 title");
                 AssertEqual("https://retro.bandcamp.com/track/sunrise", bcMeta.Entries[0].Url, "Bandcamp track 1 URL");
+            }
+        }
+
+        private static void TestV25BatchLinksTrackNumberingAndSpotifyCover()
+        {
+            using (var form = new MainForm())
+            {
+                // 1. Multi-link Batch URL extraction
+                string multiText = "Batch links:\n" +
+                    "https://music.youtube.com/watch?v=dQw4w9WgXcQ\n" +
+                    "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b\n" +
+                    "https://soundcloud.com/artist/track-1\n" +
+                    "https://music.youtube.com/watch?v=dQw4w9WgXcQ";
+                var batch = form.ExtractAllSupportedUrlsFromText(multiText);
+                AssertEqual(3, batch.Count, "Batch paste should extract 3 unique supported URLs");
+                AssertEqual("https://music.youtube.com/watch?v=dQw4w9WgXcQ", batch[0], "Batch URL 1");
+                AssertEqual("https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b", batch[1], "Batch URL 2");
+                AssertEqual("https://soundcloud.com/artist/track-1", batch[2], "Batch URL 3");
+
+                // 2. Playlist Track Numbering (01 - Title) idempotency
+                AssertEqual("01 - Nightcall", MainForm.FormatNumberedTrackTitle(1, "Nightcall", true), "Track 1 numbering");
+                AssertEqual("12 - Sunset", MainForm.FormatNumberedTrackTitle(12, "Sunset", true), "Track 12 numbering");
+                AssertEqual("01. Already Numbered", MainForm.FormatNumberedTrackTitle(1, "01. Already Numbered", true), "Do not double-number already numbered track");
+                AssertEqual("Nightcall", MainForm.FormatNumberedTrackTitle(1, "Nightcall", false), "Track numbering disabled");
+
+                // 3. Spotify Track HTML + Official 1:1 Cover Art parsing
+                string spHtml = "<meta property=\"og:title\" content=\"Blinding Lights\" />" +
+                    "<meta property=\"og:description\" content=\"The Weeknd · Song · 2020\" />" +
+                    "<meta property=\"og:image\" content=\"https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36\" />" +
+                    "<meta name=\"music:duration\" content=\"200\" />";
+                var spMeta = MainForm.ParseUniversalWebHtml(
+                    "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+                    "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+                    SocialPlatform.TikTokOrOther,
+                    spHtml);
+                AssertTrue(spMeta != null, "Spotify track HTML must parse");
+                AssertTrue(spMeta.IsAudioCentric, "Spotify track must be audio-centric");
+                AssertEqual("The Weeknd - Blinding Lights", spMeta.Title, "Spotify full track title");
+                AssertEqual("The Weeknd", spMeta.Uploader, "Spotify artist");
+                AssertEqual("https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36", spMeta.Thumbnail, "Spotify 1:1 cover art");
+                AssertEqual(200L, spMeta.DurationSec, "Spotify duration");
+                AssertEqual("ytsearch1:The Weeknd - Blinding Lights audio", spMeta.Url, "Spotify ytsearch1 audio resolution");
+
+                // 4. 1:1 Center-Square JPEG Cover Art Cropping (16:9 320x180 -> 1:1 180x180)
+                byte[] wideJpeg;
+                using (var wideBmp = new System.Drawing.Bitmap(320, 180))
+                using (var g = System.Drawing.Graphics.FromImage(wideBmp))
+                using (var ms = new MemoryStream())
+                {
+                    g.Clear(System.Drawing.Color.DarkSlateBlue);
+                    wideBmp.Save(ms, System.Drawing.Imaging.ImageFormat.Jpeg);
+                    wideJpeg = ms.ToArray();
+                }
+                byte[] squareJpeg = MainForm.CropCenterSquareJpeg(wideJpeg);
+                using (var msCheck = new MemoryStream(squareJpeg))
+                using (var sqBmp = new System.Drawing.Bitmap(msCheck))
+                {
+                    AssertEqual(180, sqBmp.Width, "Cropped cover width must be 180 (1:1 square)");
+                    AssertEqual(180, sqBmp.Height, "Cropped cover height must be 180 (1:1 square)");
+                }
             }
         }
     }

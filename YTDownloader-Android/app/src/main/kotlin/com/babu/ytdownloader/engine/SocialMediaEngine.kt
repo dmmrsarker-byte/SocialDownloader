@@ -235,6 +235,19 @@ object SocialMediaEngine {
       } ?: throw IllegalStateException("No downloadable media stream found for this link.")
 
     var streamUrl = resolveStreamUrl(extracted)
+    if (streamUrl.startsWith("https://www.youtube.com/watch?v=")) {
+      return NewPipeEngine.download(
+        processId = processId,
+        rawUrl = streamUrl,
+        options = options.copy(
+          customTitle = desiredTitle,
+          thumbnailUrl = options.thumbnailUrl ?: extracted.thumbnail,
+          artistName = options.artistName ?: extracted.uploader,
+        ),
+        outDir = outDir,
+        onProgress = onProgress,
+      )
+    }
     val needsAudioDemux = options.type == MediaType.AUDIO && extracted.audioUrl.isNullOrBlank()
     val rawDownloadTarget = if (needsAudioDemux) File(workDir, "dl_muxed_$processId.mp4") else tempFile
 
@@ -438,6 +451,8 @@ object SocialMediaEngine {
         runCatching { extractSoundCloud(cleanUrl) }.getOrElse { extractGenericHtml(cleanUrl, "SoundCloud") }
       "bandcamp.com" in u ->
         runCatching { extractBandcamp(cleanUrl) }.getOrElse { extractGenericHtml(cleanUrl, "Bandcamp") }
+      "open.spotify.com" in u ->
+        runCatching { extractSpotify(cleanUrl) }.getOrElse { extractGenericHtml(cleanUrl, "Spotify") }
       else -> extractGenericHtml(cleanUrl, hostDisplayName(cleanUrl))
     }
   }
@@ -1573,6 +1588,74 @@ object SocialMediaEngine {
       hdVideoUrl = mp3Url,
       sdVideoUrl = mp3Url,
       audioUrl = mp3Url,
+      qualityMap = emptyMap(),
+    )
+  }
+
+  // ================================================================ Spotify Track Extractor (Official 1:1 Cover + Audio Stream)
+  private fun extractSpotify(rawUrl: String): ExtractedSocialMedia {
+    val html = fetchHtmlWithHeaders(rawUrl, userAgent = DESKTOP_UA, extraHeaders = emptyMap())
+    return parseSpotifyTrackHtml(rawUrl, html)
+  }
+
+  internal fun parseSpotifyTrackHtml(
+    pageUrl: String,
+    html: String,
+    resolveYouTubeId: (String) -> String? = NewPipeEngine::searchYouTubeVideoId,
+  ): ExtractedSocialMedia {
+    val rawTitle = findMeta(html, "og:title")
+      ?: findMeta(html, "twitter:title")
+      ?: findPageTitleTag(html)?.substringBefore(" - song")?.substringBefore(" | Spotify")
+      ?: "Spotify Track"
+    val cleanTitle = decodeHtmlEntities(rawTitle).trim()
+
+    val ogDesc = findMeta(html, "og:description")?.let(::decodeHtmlEntities).orEmpty()
+    val musicianMeta = findMeta(html, "music:musician_description")?.let(::decodeHtmlEntities)
+    val pageTitle = findPageTitleTag(html)?.let(::decodeHtmlEntities).orEmpty()
+
+    val artist = when {
+      !musicianMeta.isNullOrBlank() -> musicianMeta.trim()
+      "·" in ogDesc -> ogDesc.substringBefore("·").trim()
+      "by " in pageTitle && "| Spotify" in pageTitle ->
+        pageTitle.substringAfter("by ").substringBefore("| Spotify").trim()
+      else -> "Spotify"
+    }.ifBlank { "Spotify" }
+
+    val thumb = (findMeta(html, "og:image") ?: findMeta(html, "twitter:image"))?.let(::decodeHtmlEntities)
+    val durationSec = findMeta(html, "music:duration")?.toLongOrNull()
+      ?: Regex(""""duration_ms"\s*:\s*(\d+)""").find(html)?.groupValues?.get(1)?.toLongOrNull()?.let { it / 1000L }
+
+    val searchQuery = if (artist != "Spotify" && !cleanTitle.contains(artist, ignoreCase = true)) {
+      "$artist - $cleanTitle audio"
+    } else {
+      "$cleanTitle audio"
+    }
+    val ytVideoId = resolveYouTubeId(searchQuery)
+    val previewMp3 = Regex(""""audioPreview"\s*:\s*\{\s*"url"\s*:\s*"(https?:[^"]+)"""").find(html)
+      ?.groupValues?.get(1)?.let(::unescapeJsonUrl)
+      ?: findMeta(html, "og:audio")?.let(::unescapeJsonUrl)
+
+    val resolvedStreamUrl = when {
+      !ytVideoId.isNullOrBlank() -> "https://www.youtube.com/watch?v=$ytVideoId"
+      !previewMp3.isNullOrBlank() -> previewMp3
+      else -> throw IllegalStateException("Could not resolve audio stream for Spotify track: $cleanTitle")
+    }
+
+    val fullTitle = if (artist != "Spotify" && !cleanTitle.contains(artist, ignoreCase = true)) {
+      "$artist - $cleanTitle"
+    } else {
+      cleanTitle
+    }
+
+    return ExtractedSocialMedia(
+      url = pageUrl,
+      title = fullTitle,
+      uploader = artist,
+      thumbnail = thumb,
+      durationSec = durationSec,
+      hdVideoUrl = resolvedStreamUrl,
+      sdVideoUrl = resolvedStreamUrl,
+      audioUrl = resolvedStreamUrl,
       qualityMap = emptyMap(),
     )
   }

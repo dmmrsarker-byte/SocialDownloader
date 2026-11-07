@@ -762,8 +762,11 @@ object NewPipeEngine {
     onProgress: (Float, Long, String) -> Unit,
   ): List<File> {
     val format = options.audioFormat
-    val audio = pickBestAudio(data.streams, format)
-      ?: throw IllegalStateException("No audio stream found for this video")
+    val audio = if (format == AudioFormat.MP3 && appContext != null) {
+      pickBestM4aAudio(data.streams) ?: pickBestAudio(data.streams, format)
+    } else {
+      pickBestAudio(data.streams, format)
+    } ?: throw IllegalStateException("No audio stream found for this video")
 
     val ext = format.ext
     val mimeType = when (format) {
@@ -778,12 +781,24 @@ object NewPipeEngine {
       val tempMuxed = File(workDir, "yt_muxed_audio_$processId.mp4")
       downloadStreamToFile(processId, audio.url, audio.userAgent, audio.contentLength, tempMuxed, 0f, 90f, onProgress)
       onProgress(93f, 0, "Extracting pure audio track…")
-      if (!extractAudioTrackFromMp4(tempMuxed, tempOut)) {
+      val extractedOk = if (format == AudioFormat.MP3) {
+        extractAdtsAudioFromMp4(tempMuxed, tempOut) || extractAudioTrackFromMp4(tempMuxed, tempOut)
+      } else {
+        extractAudioTrackFromMp4(tempMuxed, tempOut)
+      }
+      if (!extractedOk) {
         tempMuxed.copyTo(tempOut, overwrite = true)
       }
       tempMuxed.delete()
     } else {
-      downloadStreamToFile(processId, audio.url, audio.userAgent, audio.contentLength, tempOut, 0f, 94f, onProgress)
+      downloadStreamToFile(processId, audio.url, audio.userAgent, audio.contentLength, tempOut, 0f, 92f, onProgress)
+      if (format == AudioFormat.MP3 && isMp4Container(tempOut)) {
+        val tempAdts = File(workDir, "yt_adts_$processId.aac")
+        if (extractAdtsAudioFromMp4(tempOut, tempAdts)) {
+          tempAdts.copyTo(tempOut, overwrite = true)
+        }
+        tempAdts.delete()
+      }
     }
 
     val savedFiles = mutableListOf<File>()
@@ -1345,7 +1360,203 @@ object NewPipeEngine {
     return thumbnailUrl
   }
 
-  internal fun fetchCoverArtBytes(thumbnailUrl: String, videoId: String? = null): Pair<ByteArray, String>? {
+  /**
+   * Extracts raw AAC frames from an MP4/M4A file and wraps each sample in a 7-byte ADTS header (`0xFF 0xF1`).
+   * An ADTS AAC stream is a pure frame stream (like MP3) with no byte-0 `stco` chunk table, so prepending
+   * an ID3v2.3 tag header (`TIT2`, `TPE1`, `TALB`, `APIC` Cover Art) is 100% container-safe!
+   */
+  internal fun extractAdtsAudioFromMp4(inputMp4: File, outputAdts: File): Boolean {
+    if (!inputMp4.exists() || inputMp4.length() == 0L) return false
+    outputAdts.delete()
+    val extractor = MediaExtractor()
+    return try {
+      extractor.setDataSource(inputMp4.absolutePath)
+      var audioTrack = -1
+      var sampleRate = 44100
+      var channelCount = 2
+      for (i in 0 until extractor.trackCount) {
+        val fmt = extractor.getTrackFormat(i)
+        val mime = fmt.getString(android.media.MediaFormat.KEY_MIME).orEmpty()
+        if (mime.startsWith("audio/mp4a")) {
+          extractor.selectTrack(i)
+          audioTrack = i
+          if (fmt.containsKey(android.media.MediaFormat.KEY_SAMPLE_RATE)) {
+            sampleRate = fmt.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+          }
+          if (fmt.containsKey(android.media.MediaFormat.KEY_CHANNEL_COUNT)) {
+            channelCount = fmt.getInteger(android.media.MediaFormat.KEY_CHANNEL_COUNT).coerceIn(1, 7)
+          }
+          break
+        }
+      }
+      if (audioTrack < 0) return false
+      val freqIdx = when (sampleRate) {
+        96000 -> 0
+        88200 -> 1
+        64000 -> 2
+        48000 -> 3
+        44100 -> 4
+        32000 -> 5
+        24000 -> 6
+        22050 -> 7
+        16000 -> 8
+        12000 -> 9
+        11025 -> 10
+        8000 -> 11
+        7350 -> 12
+        else -> 4
+      }
+      val profile = 2 // AAC LC
+      val buffer = ByteBuffer.allocate(256 * 1024)
+      val adtsHeader = ByteArray(7)
+      val sampleBytes = ByteArray(256 * 1024)
+      FileOutputStream(outputAdts).use { out ->
+        while (true) {
+          buffer.clear()
+          val sampleSize = extractor.readSampleData(buffer, 0)
+          if (sampleSize < 0) break
+          if (sampleSize > 0 && sampleSize <= sampleBytes.size) {
+            val packetLen = sampleSize + 7
+            adtsHeader[0] = 0xFF.toByte()
+            adtsHeader[1] = 0xF1.toByte() // MPEG-4, Layer 0, no CRC
+            adtsHeader[2] = (((profile - 1) shl 6) or (freqIdx shl 2) or (channelCount shr 2)).toByte()
+            adtsHeader[3] = (((channelCount and 3) shl 6) or (packetLen shr 11)).toByte()
+            adtsHeader[4] = ((packetLen and 0x7FF) shr 3).toByte()
+            adtsHeader[5] = (((packetLen and 7) shl 5) or 0x1F).toByte()
+            adtsHeader[6] = 0xFC.toByte()
+            out.write(adtsHeader, 0, 7)
+            buffer.get(sampleBytes, 0, sampleSize)
+            out.write(sampleBytes, 0, sampleSize)
+          }
+          extractor.advance()
+        }
+      }
+      outputAdts.exists() && outputAdts.length() > 0L
+    } catch (_: Throwable) {
+      outputAdts.delete()
+      false
+    } finally {
+      runCatching { extractor.release() }
+    }
+  }
+
+  internal fun isMp4Container(file: File): Boolean {
+    if (!file.exists() || file.length() < 8L) return false
+    return runCatching {
+      val header = ByteArray(8)
+      val n = FileInputStream(file).use { it.read(header) }
+      n == 8 &&
+        header[4] == 'f'.code.toByte() &&
+        header[5] == 't'.code.toByte() &&
+        header[6] == 'y'.code.toByte() &&
+        header[7] == 'p'.code.toByte()
+    }.getOrDefault(false)
+  }
+
+  internal fun isWebmOrOggContainer(file: File): Boolean {
+    if (!file.exists() || file.length() < 4L) return false
+    return runCatching {
+      val h = ByteArray(4)
+      val n = FileInputStream(file).use { it.read(h) }
+      if (n < 4) return@runCatching false
+      val isEbml = h[0] == 0x1A.toByte() && h[1] == 0x45.toByte() && h[2] == 0xDF.toByte() && h[3] == 0xA3.toByte()
+      val isOgg = h[0] == 'O'.code.toByte() && h[1] == 'g'.code.toByte() && h[2] == 'g'.code.toByte() && h[3] == 'S'.code.toByte()
+      isEbml || isOgg
+    }.getOrDefault(false)
+  }
+
+  /**
+   * Crops a widescreen (e.g. 16:9 YouTube `1280x720`) thumbnail into a centered 1:1 square JPEG
+   * album cover for music players. Falls back to [imageBytes] if already square or in JVM unit tests.
+   */
+  internal fun cropCenterSquareJpeg(imageBytes: ByteArray): ByteArray {
+    if (imageBytes.size < 64) return imageBytes
+    return runCatching {
+      val bmp = android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+        ?: return imageBytes
+      val w = bmp.width
+      val h = bmp.height
+      if (w <= 0 || h <= 0 || w == h) return imageBytes
+      val size = minOf(w, h)
+      val x = (w - size) / 2
+      val y = (h - size) / 2
+      val square = android.graphics.Bitmap.createBitmap(bmp, x, y, size, size)
+      val out = java.io.ByteArrayOutputStream()
+      square.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, out)
+      val cropped = out.toByteArray()
+      if (cropped.size > 512) cropped else imageBytes
+    }.getOrDefault(imageBytes)
+  }
+
+  /**
+   * Searches YouTube via Innertube `/youtubei/v1/search` and returns the top matching 11-character `videoId`.
+   * Used to resolve Spotify track metadata (`Artist - Title`) to a high-bitrate audio stream.
+   */
+  internal fun searchYouTubeVideoId(query: String): String? {
+    val cleanQuery = query.trim().replace("\"", "\\\"")
+    if (cleanQuery.isEmpty()) return null
+    val payload = """
+      {
+        "query": "$cleanQuery",
+        "context": {
+          "client": {
+            "clientName": "WEB",
+            "clientVersion": "2.20241126.01.00",
+            "hl": "en",
+            "gl": "US"
+          }
+        }
+      }
+    """.trimIndent()
+    return runCatching {
+      val req = Request.Builder()
+        .url("https://www.youtube.com/youtubei/v1/search?prettyPrint=false")
+        .header("User-Agent", DESKTOP_USER_AGENT)
+        .header("Content-Type", "application/json")
+        .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+        .build()
+      val respJson = httpClient.newCall(req).execute().use { resp ->
+        if (!resp.isSuccessful) return@use null
+        resp.body?.string()
+      } ?: return null
+      parseInnertubeSearchVideoId(respJson)
+    }.getOrNull()
+  }
+
+  internal fun parseInnertubeSearchVideoId(rawJson: String): String? {
+    val root = runCatching { json.parseToJsonElement(rawJson).jsonObject }.getOrNull() ?: return null
+    var foundId: String? = null
+    fun walk(node: kotlinx.serialization.json.JsonElement?) {
+      if (foundId != null) return
+      when (node) {
+        is JsonObject -> {
+          (node["videoRenderer"] as? JsonObject)?.str("videoId")?.takeIf { it.length == 11 }?.let {
+            foundId = it
+            return
+          }
+          for ((_, v) in node) {
+            walk(v)
+            if (foundId != null) return
+          }
+        }
+        is JsonArray -> {
+          for (item in node) {
+            walk(item)
+            if (foundId != null) return
+          }
+        }
+        else -> Unit
+      }
+    }
+    walk(root)
+    return foundId ?: Regex(""""videoId"\s*:\s*"([A-Za-z0-9_-]{11})"""").find(rawJson)?.groupValues?.get(1)
+  }
+
+  internal fun fetchCoverArtBytes(
+    thumbnailUrl: String,
+    videoId: String? = null,
+    cropSquare: Boolean = true,
+  ): Pair<ByteArray, String>? {
     val candidates = buildList {
       if (!videoId.isNullOrBlank()) {
         add("https://i.ytimg.com/vi/$videoId/maxresdefault.jpg")
@@ -1362,11 +1573,16 @@ object NewPipeEngine {
         val req = Request.Builder().url(url).header("User-Agent", DESKTOP_USER_AGENT).build()
         httpClient.newCall(req).execute().use { resp ->
           if (!resp.isSuccessful) return@use null
-          val bytes = resp.body?.bytes() ?: return@use null
-          if (bytes.size < 512) return@use null
-          val mime = resp.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase()
-            ?.takeIf { it.startsWith("image/") }
-            ?: if (bytes.size >= 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte()) "image/png" else "image/jpeg"
+          val rawBytes = resp.body?.bytes() ?: return@use null
+          if (rawBytes.size < 512) return@use null
+          val bytes = if (cropSquare) cropCenterSquareJpeg(rawBytes) else rawBytes
+          val mime = if (bytes !== rawBytes) {
+            "image/jpeg"
+          } else {
+            resp.header("Content-Type")?.substringBefore(';')?.trim()?.lowercase()
+              ?.takeIf { it.startsWith("image/") }
+              ?: if (bytes.size >= 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte()) "image/png" else "image/jpeg"
+          }
           bytes to mime
         }
       }.getOrNull()
@@ -1378,11 +1594,11 @@ object NewPipeEngine {
   /**
    * Downloads and saves standalone high-resolution Music Cover / Video Thumbnail to [outDir].
    */
-  fun downloadCoverArt(rawThumbnailUrl: String, title: String, outDir: File): File {
+  fun downloadCoverArt(rawThumbnailUrl: String, title: String, outDir: File, cropSquare: Boolean = true): File {
     ensureInit()
     outDir.mkdirs()
     val vid = Regex("""/vi/([A-Za-z0-9_-]{11})/""").find(rawThumbnailUrl)?.groupValues?.get(1)
-    val (bytes, mime) = fetchCoverArtBytes(rawThumbnailUrl, vid)
+    val (bytes, mime) = fetchCoverArtBytes(rawThumbnailUrl, vid, cropSquare = cropSquare)
       ?: throw IOException("Could not download music cover image")
     val ext = if ("png" in mime) "png" else "jpg"
     val safeTitle = sanitizeFileName(title).take(90)
@@ -1397,6 +1613,8 @@ object NewPipeEngine {
   /**
    * Prepends a standards-compliant ID3v2.3 tag header (`TIT2` Title, `TPE1` Artist, `TALB` Album/Playlist,
    * and `APIC` Attached Picture Front Cover `0x03`) to [audioFile] so music players display the Music Cover Art!
+   * Automatically converts MP4/M4A containers to streamable ADTS AAC frames first, and guards against
+   * shifting byte-0 headers of fixed-offset containers (`ftyp` MP4, `0x1A45DFA3` WebM, `OggS`).
    */
   internal fun embedId3v2CoverAndMetadata(
     audioFile: File,
@@ -1407,6 +1625,17 @@ object NewPipeEngine {
     coverMime: String = "image/jpeg",
   ): Boolean {
     if (!audioFile.exists() || audioFile.length() == 0L) return false
+    if (isMp4Container(audioFile)) {
+      val adtsTmp = File(audioFile.parentFile, "${audioFile.name}.adts")
+      if (extractAdtsAudioFromMp4(audioFile, adtsTmp)) {
+        adtsTmp.copyTo(audioFile, overwrite = true)
+      }
+      adtsTmp.delete()
+    }
+    if (isMp4Container(audioFile) || isWebmOrOggContainer(audioFile)) {
+      // Never shift byte-0 offsets of an un-demuxed MP4/WebM/Ogg container
+      return false
+    }
     return runCatching {
       val frames = java.io.ByteArrayOutputStream()
 

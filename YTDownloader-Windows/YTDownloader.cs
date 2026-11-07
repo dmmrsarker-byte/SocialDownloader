@@ -78,13 +78,13 @@ namespace YTDownloaderWindows
             {
                 "en", new Dictionary<string, string>
                 {
-                    { "app_subtitle", "Universal Playlist, Music Cover, Best Audio & 4K Video Downloader for YT Music, YouTube, SoundCloud, FB, IG, X, TikTok & Any Site" },
+                    { "app_subtitle", "Universal Playlist, 1:1 Music Cover, Best Audio & 4K Video Downloader for YT Music, YouTube, Spotify, SoundCloud, FB, IG, X, TikTok & Any Site" },
                     { "btn_downloads_folder", "📂 Downloads" },
                     { "btn_update_engine", "🔄 Update Engine" },
                     { "engine_checking", "Checking engine..." },
                     { "auto_grab_chk", "⚡ Auto-grab & download copied links" },
                     { "cookies_chk", "Use Browser Cookies (for private/login videos):" },
-                    { "prompt_unified", "🔗 Paste Any Playlist, YT Music, Audio, Social Media, Web or Adult Link (YT Music, YouTube, SoundCloud, FB, IG, X, TikTok, Pornhub & Any Site):" },
+                    { "prompt_unified", "🔗 Paste Any Playlist, YT Music, Spotify, Audio, Social, Web or Multiple Batch Links:" },
                     { "chk_mix", "Load full playlist for YouTube Radio Mix (&list=RD...)" },
                     { "btn_paste", "📋 Paste" },
                     { "btn_search", "🔍 Search" },
@@ -669,7 +669,10 @@ namespace YTDownloaderWindows
         private Panel pnlPlaylist;
         private Label lblPlaylistCount;
         private Button btnSelectAll;
+        private Button btnSelectInvert;
         private Button btnSelectNone;
+        private CheckBox chkNumberTracks;
+        private TextBox txtPlaylistFilter;
         private ListView lvPlaylist;
 
         // Bottom Tabs (Queue + History + Monetization)
@@ -835,7 +838,7 @@ namespace YTDownloaderWindows
 
         private void InitializeUi()
         {
-            Text = "Social Downloader v2.4";
+            Text = "Social Downloader v2.5";
             Size = new Size(1120, 860);
             MinimumSize = new Size(1020, 720);
             StartPosition = FormStartPosition.CenterScreen;
@@ -873,7 +876,7 @@ namespace YTDownloaderWindows
 
             Label lblAppTitle = new Label
             {
-                Text = "Social Downloader v2.4",
+                Text = "Social Downloader v2.5",
                 Font = new Font("Segoe UI Semibold", 15f, FontStyle.Bold),
                 ForeColor = TextPrimary,
                 AutoSize = true,
@@ -1373,23 +1376,55 @@ namespace YTDownloaderWindows
             };
             pnlPlaylist.Controls.Add(lblPlaylistCount);
 
-            btnSelectAll = CreateStyledButton(I18n.T("btn_select_all"), Color.FromArgb(48, 50, 64), 95, 26);
+            btnSelectAll = CreateStyledButton(I18n.T("btn_select_all"), Color.FromArgb(48, 50, 64), 85, 26);
             btnSelectAll.Font = new Font("Segoe UI", 8.5f);
-            btnSelectAll.Location = new Point(320, 0);
+            btnSelectAll.Location = new Point(315, 0);
             btnSelectAll.Click += (s, e) =>
             {
                 foreach (ListViewItem item in lvPlaylist.Items) item.Checked = true;
             };
             pnlPlaylist.Controls.Add(btnSelectAll);
 
-            btnSelectNone = CreateStyledButton(I18n.T("btn_select_none"), Color.FromArgb(48, 50, 64), 95, 26);
+            btnSelectInvert = CreateStyledButton("Invert", Color.FromArgb(48, 50, 64), 72, 26);
+            btnSelectInvert.Font = new Font("Segoe UI", 8.5f);
+            btnSelectInvert.Location = new Point(406, 0);
+            btnSelectInvert.Click += (s, e) =>
+            {
+                foreach (ListViewItem item in lvPlaylist.Items) item.Checked = !item.Checked;
+            };
+            pnlPlaylist.Controls.Add(btnSelectInvert);
+
+            btnSelectNone = CreateStyledButton(I18n.T("btn_select_none"), Color.FromArgb(48, 50, 64), 85, 26);
             btnSelectNone.Font = new Font("Segoe UI", 8.5f);
-            btnSelectNone.Location = new Point(422, 0);
+            btnSelectNone.Location = new Point(484, 0);
             btnSelectNone.Click += (s, e) =>
             {
                 foreach (ListViewItem item in lvPlaylist.Items) item.Checked = false;
             };
             pnlPlaylist.Controls.Add(btnSelectNone);
+
+            chkNumberTracks = new CheckBox
+            {
+                Text = "🔢 Number Tracks (01, 02...)",
+                Font = new Font("Segoe UI", 8.5f),
+                ForeColor = TextSecondary,
+                Location = new Point(580, 4),
+                AutoSize = true,
+                Checked = true
+            };
+            pnlPlaylist.Controls.Add(chkNumberTracks);
+
+            txtPlaylistFilter = new TextBox
+            {
+                Location = new Point(775, 2),
+                Width = 210,
+                BackColor = CardInput,
+                ForeColor = TextPrimary,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Segoe UI", 8.8f)
+            };
+            txtPlaylistFilter.TextChanged += (s, e) => FilterPlaylistListView();
+            pnlPlaylist.Controls.Add(txtPlaylistFilter);
 
             lvPlaylist = new ListView
             {
@@ -2025,6 +2060,64 @@ namespace YTDownloaderWindows
             return null;
         }
 
+        internal List<string> ExtractAllSupportedUrlsFromText(string text)
+        {
+            var list = new List<string>();
+            if (string.IsNullOrWhiteSpace(text)) return list;
+            foreach (Match m in Regex.Matches(text, @"https?://\S+", RegexOptions.IgnoreCase))
+            {
+                string candidate = ExtractSupportedUrlFromText(m.Value);
+                if (!string.IsNullOrEmpty(candidate) && !list.Any(u => string.Equals(u, candidate, StringComparison.OrdinalIgnoreCase)))
+                {
+                    list.Add(candidate);
+                }
+            }
+            return list;
+        }
+
+        internal static string FormatNumberedTrackTitle(int trackNumber, string rawTitle, bool enabled)
+        {
+            if (!enabled || string.IsNullOrWhiteSpace(rawTitle)) return rawTitle;
+            if (Regex.IsMatch(rawTitle.Trim(), @"^\d{1,3}[\s._-]+")) return rawTitle.Trim();
+            return string.Format("{0:00} - {1}", trackNumber, rawTitle.Trim());
+        }
+
+        internal static byte[] CropCenterSquareJpeg(byte[] imageBytes)
+        {
+            if (imageBytes == null || imageBytes.Length < 64) return imageBytes;
+            try
+            {
+                using (var msIn = new MemoryStream(imageBytes))
+                using (var srcBmp = new Bitmap(msIn))
+                {
+                    int w = srcBmp.Width;
+                    int h = srcBmp.Height;
+                    if (w <= 0 || h <= 0 || w == h) return imageBytes;
+                    int size = Math.Min(w, h);
+                    int x = (w - size) / 2;
+                    int y = (h - size) / 2;
+                    using (var dstBmp = new Bitmap(size, size))
+                    {
+                        using (var g = Graphics.FromImage(dstBmp))
+                        {
+                            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                            g.DrawImage(srcBmp, new Rectangle(0, 0, size, size), new Rectangle(x, y, size, size), GraphicsUnit.Pixel);
+                        }
+                        using (var msOut = new MemoryStream())
+                        {
+                            dstBmp.Save(msOut, System.Drawing.Imaging.ImageFormat.Jpeg);
+                            byte[] cropped = msOut.ToArray();
+                            return cropped.Length > 256 ? cropped : imageBytes;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                return imageBytes;
+            }
+        }
+
         private void ClearUrlInputAndPreview()
         {
             if (pasteDebounceTimer != null) pasteDebounceTimer.Stop();
@@ -2497,18 +2590,8 @@ namespace YTDownloaderWindows
                 pnlPlaylist.Visible = true;
                 pnlMediaCard.Height = 305;
 
-                lvPlaylist.BeginUpdate();
-                lvPlaylist.Items.Clear();
-                for (int i = 0; i < meta.Entries.Count; i++)
-                {
-                    var entry = meta.Entries[i];
-                    var lvi = new ListViewItem((i + 1).ToString()) { Checked = true, Tag = entry };
-                    lvi.SubItems.Add(entry.Title);
-                    lvi.SubItems.Add(entry.Uploader ?? "");
-                    lvi.SubItems.Add(FormatDuration(entry.DurationSec));
-                    lvPlaylist.Items.Add(lvi);
-                }
-                lvPlaylist.EndUpdate();
+                if (txtPlaylistFilter != null) txtPlaylistFilter.Text = "";
+                FilterPlaylistListView(meta);
             }
             else
             {
@@ -2559,6 +2642,31 @@ namespace YTDownloaderWindows
             }
         }
 
+        private void FilterPlaylistListView(MediaMetadata metaOverride = null)
+        {
+            var meta = metaOverride ?? currentMedia;
+            if (meta == null || !meta.IsPlaylist || lvPlaylist == null) return;
+            string q = (txtPlaylistFilter != null ? txtPlaylistFilter.Text : "").Trim().ToLowerInvariant();
+            lvPlaylist.BeginUpdate();
+            lvPlaylist.Items.Clear();
+            for (int i = 0; i < meta.Entries.Count; i++)
+            {
+                var entry = meta.Entries[i];
+                if (!string.IsNullOrEmpty(q))
+                {
+                    bool matchTitle = !string.IsNullOrEmpty(entry.Title) && entry.Title.ToLowerInvariant().Contains(q);
+                    bool matchUploader = !string.IsNullOrEmpty(entry.Uploader) && entry.Uploader.ToLowerInvariant().Contains(q);
+                    if (!matchTitle && !matchUploader) continue;
+                }
+                var lvi = new ListViewItem((i + 1).ToString()) { Checked = true, Tag = entry };
+                lvi.SubItems.Add(entry.Title);
+                lvi.SubItems.Add(entry.Uploader ?? "");
+                lvi.SubItems.Add(FormatDuration(entry.DurationSec));
+                lvPlaylist.Items.Add(lvi);
+            }
+            lvPlaylist.EndUpdate();
+        }
+
         private void SaveCurrentMusicCover()
         {
             var meta = currentMedia;
@@ -2580,6 +2688,7 @@ namespace YTDownloaderWindows
             string coversDir = Path.Combine(DownloadFolder, "Covers");
             Directory.CreateDirectory(coversDir);
             string destPath = Path.Combine(coversDir, safeBase + " [Cover].jpg");
+            bool cropSquare = (rbAudio != null && rbAudio.Checked) || meta.IsAudioCentric;
 
             Task.Run(() =>
             {
@@ -2598,6 +2707,10 @@ namespace YTDownloaderWindows
                         {
                             bytes = wc.DownloadData(thumbUrl);
                         }
+                    }
+                    if (cropSquare)
+                    {
+                        bytes = CropCenterSquareJpeg(bytes);
                     }
                     File.WriteAllBytes(destPath, bytes);
                     Invoke(new Action(() =>
@@ -2650,19 +2763,24 @@ namespace YTDownloaderWindows
             var newJobs = new List<DownloadJob>();
             if (media.IsPlaylist)
             {
+                bool numberTracks = chkNumberTracks != null && chkNumberTracks.Checked;
                 foreach (ListViewItem item in lvPlaylist.Items)
                 {
                     if (!item.Checked) continue;
                     var entry = item.Tag as PlaylistEntryItem;
                     if (entry == null) continue;
 
+                    int trackNum = 1;
+                    int.TryParse(item.Text, out trackNum);
+                    string formattedTitle = FormatNumberedTrackTitle(trackNum, entry.Title, numberTracks);
                     string plFolder = Path.Combine(DownloadFolder, SanitizeFileName(media.Title));
                     newJobs.Add(new DownloadJob
                     {
                         Url = entry.Url,
                         RawInputUrl = media.RawInputUrl,
                         Platform = media.Platform,
-                        Title = entry.Title,
+                        Title = formattedTitle,
+                        CustomTitle = formattedTitle,
                         Uploader = entry.Uploader,
                         PlaylistTitle = media.Title,
                         IsAudio = isAudio,
@@ -2955,6 +3073,8 @@ namespace YTDownloaderWindows
                         args.Add("--embed-thumbnail");
                         args.Add("--convert-thumbnails");
                         args.Add("jpg");
+                        args.Add("--ppa");
+                        args.Add("\"ThumbnailsConvertor:-vf crop=ih:ih\"");
                     }
                 }
             }
@@ -3123,6 +3243,39 @@ namespace YTDownloaderWindows
         internal static MediaMetadata ParseUniversalWebHtml(string pageUrl, string rawUrl, SocialPlatform platform, string html)
         {
             if (string.IsNullOrWhiteSpace(html)) return null;
+
+            // 0a. Spotify Track parsing (Official 1:1 Cover Art + Artist - Title audio resolution)
+            if ((pageUrl ?? "").IndexOf("open.spotify.com/track/", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                string spTitle = WebUtility.HtmlDecode(ExtractHtmlMeta(html, "og:title") ?? ExtractHtmlMeta(html, "twitter:title") ?? "Spotify Track").Trim();
+                string spDesc = WebUtility.HtmlDecode(ExtractHtmlMeta(html, "og:description") ?? "").Trim();
+                string spArtist = WebUtility.HtmlDecode(ExtractHtmlMeta(html, "music:musician_description") ?? "").Trim();
+                if (string.IsNullOrEmpty(spArtist) && spDesc.Contains("·"))
+                {
+                    spArtist = spDesc.Split('·')[0].Trim();
+                }
+                if (string.IsNullOrEmpty(spArtist)) spArtist = "Spotify";
+                string spThumb = ExtractHtmlMeta(html, "og:image") ?? ExtractHtmlMeta(html, "twitter:image");
+                long spDur = 0;
+                string durMeta = ExtractHtmlMeta(html, "music:duration");
+                if (!string.IsNullOrEmpty(durMeta)) long.TryParse(durMeta, out spDur);
+                string fullSpTitle = (spArtist != "Spotify" && spTitle.IndexOf(spArtist, StringComparison.OrdinalIgnoreCase) < 0)
+                    ? (spArtist + " - " + spTitle)
+                    : spTitle;
+                return new MediaMetadata
+                {
+                    Url = "ytsearch1:" + fullSpTitle + " audio",
+                    RawInputUrl = rawUrl ?? pageUrl,
+                    Platform = SocialPlatform.YouTube,
+                    Title = fullSpTitle,
+                    Uploader = spArtist,
+                    Thumbnail = !string.IsNullOrWhiteSpace(spThumb) ? UnescapeJsonUrl(spThumb) : null,
+                    DurationSec = spDur,
+                    IsPlaylist = false,
+                    IsAudioCentric = true,
+                    VideoHeights = new List<int> { 1080 }
+                };
+            }
 
             // 0. Bandcamp multi-track Album / Playlist parsing
             if ((pageUrl ?? "").IndexOf("bandcamp.com", StringComparison.OrdinalIgnoreCase) >= 0 &&

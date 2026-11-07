@@ -144,8 +144,8 @@ fun HomeScreen(vm: MainViewModel, onQueued: (Int) -> Unit) {
         onValueChange = vm::onUrlChange,
         modifier = Modifier.fillMaxWidth(),
         label = { Text(S.t("url_label_unified", lang)) },
-        placeholder = { Text("https://… (YT Music, YouTube, SoundCloud, FB, IG, X, TikTok, Pornhub, XVideos & Any Site)") },
-        singleLine = true,
+        placeholder = { Text("https://… (YT Music, YouTube, Spotify, SoundCloud, FB, IG, X, TikTok, Pornhub & Any Site)") },
+        maxLines = 3,
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Search),
         keyboardActions = KeyboardActions(onSearch = { vm.analyze(autoStart = false) }),
         trailingIcon = {
@@ -166,6 +166,20 @@ fun HomeScreen(vm: MainViewModel, onQueued: (Int) -> Unit) {
         supportingText = state.error?.let { { Text(it) } },
       )
       Spacer(Modifier.height(8.dp))
+      if (state.batchUrls.size > 1) {
+        Button(
+          onClick = {
+            val queued = vm.enqueueBatchUrls()
+            if (queued > 0) onQueued(queued)
+          },
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Icon(AppIcons.Download, null)
+          Spacer(Modifier.width(8.dp))
+          Text("⚡ ${S.t("batch_download_btn", lang)} (${state.batchUrls.size})")
+        }
+        Spacer(Modifier.height(6.dp))
+      }
       Button(
         onClick = { vm.analyze(autoStart = false) },
         enabled = !state.loading && state.url.isNotBlank(),
@@ -263,17 +277,48 @@ fun HomeScreen(vm: MainViewModel, onQueued: (Int) -> Unit) {
       }
       if (info.isPlaylist) {
         item {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-              "${S.t("playlist_selected", lang)} (${state.selected.size}/${info.entries.size})",
-              style = MaterialTheme.typography.titleMedium,
-              modifier = Modifier.weight(1f),
+          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              Text(
+                "${S.t("playlist_selected", lang)} (${state.selected.size}/${info.entries.size})",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+              )
+              TextButton(onClick = { vm.selectAll(true) }) { Text(S.t("select_all", lang)) }
+              TextButton(onClick = { vm.invertPlaylistSelection() }) { Text(S.t("select_invert", lang)) }
+              TextButton(onClick = { vm.selectAll(false) }) { Text(S.t("select_none", lang)) }
+            }
+            OutlinedTextField(
+              value = state.playlistQuery,
+              onValueChange = vm::setPlaylistQuery,
+              modifier = Modifier.fillMaxWidth(),
+              label = { Text(S.t("search_playlist_hint", lang)) },
+              leadingIcon = { Icon(Icons.Default.Search, null, Modifier.size(18.dp)) },
+              trailingIcon = {
+                if (state.playlistQuery.isNotEmpty()) {
+                  IconButton(onClick = { vm.setPlaylistQuery("") }) {
+                    Icon(Icons.Default.Clear, "Clear")
+                  }
+                }
+              },
+              singleLine = true,
             )
-            TextButton(onClick = { vm.selectAll(true) }) { Text(S.t("select_all", lang)) }
-            TextButton(onClick = { vm.selectAll(false) }) { Text(S.t("select_none", lang)) }
+            FilterChip(
+              selected = state.numberPlaylistTracks,
+              onClick = { vm.setNumberPlaylistTracks(!state.numberPlaylistTracks) },
+              label = { Text(S.t("number_tracks_label", lang)) },
+            )
           }
         }
-        itemsIndexed(info.entries) { index, entry ->
+        val query = state.playlistQuery.trim().lowercase()
+        val filteredEntries = info.entries.mapIndexedNotNull { idx, entry ->
+          if (query.isEmpty() || entry.title.lowercase().contains(query) || entry.uploader?.lowercase()?.contains(query) == true) {
+            idx to entry
+          } else {
+            null
+          }
+        }
+        itemsIndexed(filteredEntries) { _, (index, entry) ->
           Row(
             modifier = Modifier
               .fillMaxWidth()
@@ -283,10 +328,10 @@ fun HomeScreen(vm: MainViewModel, onQueued: (Int) -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
           ) {
             Checkbox(checked = index in state.selected, onCheckedChange = { vm.toggleEntry(index) })
-            Thumb(entry.thumbnail ?: info.thumbnail, Modifier.width(88.dp))
+            Thumb(entry.thumbnail ?: info.thumbnail, Modifier.width(84.dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-              Text("${index + 1}. ${entry.title}", maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+              Text("%02d. %s".format(index + 1, entry.title), maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
               val subLine = listOfNotNull(
                 entry.uploader?.takeIf { it.isNotBlank() },
                 formatDuration(entry.durationSec).takeIf { it.isNotBlank() },
@@ -294,6 +339,14 @@ fun HomeScreen(vm: MainViewModel, onQueued: (Int) -> Unit) {
               if (subLine.isNotEmpty()) {
                 Text(subLine, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
               }
+            }
+            IconButton(
+              onClick = {
+                val queued = vm.downloadSinglePlaylistEntry(index)
+                if (queued > 0) onQueued(queued)
+              },
+            ) {
+              Icon(AppIcons.Download, contentDescription = "Download Track", tint = MaterialTheme.colorScheme.primary)
             }
           }
         }

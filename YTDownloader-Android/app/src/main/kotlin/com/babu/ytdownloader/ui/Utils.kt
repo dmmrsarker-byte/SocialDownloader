@@ -55,6 +55,26 @@ fun extractUrl(text: String?): String? {
   return null
 }
 
+/** Extracts all valid URLs from a multi-link pasted or shared text block. */
+fun extractAllUrls(text: String?): List<String> {
+  if (text.isNullOrBlank()) return emptyList()
+  val result = mutableListOf<String>()
+  for (m in urlRegex.findAll(text)) {
+    val raw = m.value.trimEnd('.', ',', ')', ']', '"', '\'', ';', '>')
+    val normalized = when {
+      raw.startsWith("HTTP://", ignoreCase = true) && !raw.startsWith("http://") ->
+        "http://" + raw.substring(7)
+      raw.startsWith("HTTPS://", ignoreCase = true) && !raw.startsWith("https://") ->
+        "https://" + raw.substring(8)
+      else -> raw
+    }
+    if ("/" in normalized.substringAfter("://") && normalized !in result) {
+      result.add(normalized)
+    }
+  }
+  return result
+}
+
 private val socialHosts = listOf(
   "youtube.com/", "youtu.be/", "music.youtube.com/",
   "soundcloud.com/", "on.soundcloud.com/", "bandcamp.com/", "audiomack.com/", "mixcloud.com/", "open.spotify.com/",

@@ -26,7 +26,7 @@ object YtDlpEngine {
   private val _state = MutableStateFlow<State>(State.Initializing)
   val state: StateFlow<State> = _state.asStateFlow()
 
-  private const val ENGINE_VERSION = "SocialEngine v2.4 • NewPipe v0.26.5"
+  private const val ENGINE_VERSION = "SocialEngine v2.5 • NewPipe v0.26.5"
 
   fun init(context: Context) {
     runCatching { NewPipeEngine.init(context) }

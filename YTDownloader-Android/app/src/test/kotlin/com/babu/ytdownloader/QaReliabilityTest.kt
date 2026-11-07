@@ -2,6 +2,7 @@ package com.babu.ytdownloader
 
 import com.babu.ytdownloader.engine.NewPipeEngine
 import com.babu.ytdownloader.engine.SocialMediaEngine
+import com.babu.ytdownloader.ui.extractAllUrls
 import com.babu.ytdownloader.ui.extractUrl
 import com.babu.ytdownloader.ui.isSupportedSocialUrl
 import java.io.File
@@ -534,6 +535,118 @@ class QaReliabilityTest {
       assertEquals(sizeAfterFirstTag, tmpMp3.readBytes().size)
     } finally {
       tmpMp3.delete()
+    }
+  }
+
+  @Test
+  fun testV25SpotifyTrackBatchUrlsAndContainerSafeId3() {
+    // 1. Multi-link Batch URL extraction
+    val multiPaste = """
+      Check out these tracks:
+      1) https://music.youtube.com/watch?v=dQw4w9WgXcQ
+      2) https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT
+      3) https://soundcloud.com/artist/synthwave-midnight-drive,
+      Duplicate ignored: https://music.youtube.com/watch?v=dQw4w9WgXcQ
+    """.trimIndent()
+    val batch = extractAllUrls(multiPaste)
+    assertEquals(3, batch.size)
+    assertEquals("https://music.youtube.com/watch?v=dQw4w9WgXcQ", batch[0])
+    assertEquals("https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT", batch[1])
+    assertEquals("https://soundcloud.com/artist/synthwave-midnight-drive", batch[2])
+
+    // 2. Innertube Search VideoId JSON parsing + Spotify Track HTML + Official 1:1 Cover Art extraction
+    val sampleSearchJson = """
+      {
+        "contents": {
+          "twoColumnSearchResultsRenderer": {
+            "primaryContents": {
+              "sectionListRenderer": {
+                "contents": [
+                  {
+                    "itemSectionRenderer": {
+                      "contents": [
+                        {
+                          "videoRenderer": {
+                            "videoId": "dQw4w9WgXcQ",
+                            "title": { "runs": [{ "text": "Rick Astley - Never Gonna Give You Up (Official Audio)" }] }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    """.trimIndent()
+    assertEquals("dQw4w9WgXcQ", NewPipeEngine.parseInnertubeSearchVideoId(sampleSearchJson))
+
+    val spotifyHtml = """
+      <html>
+        <head>
+          <meta property="og:title" content="Blinding Lights" />
+          <meta property="og:description" content="The Weeknd · Song · 2020" />
+          <meta property="og:image" content="https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36" />
+          <meta name="music:duration" content="200" />
+        </head>
+      </html>
+    """.trimIndent()
+    val spExtracted = SocialMediaEngine.parseSpotifyTrackHtml(
+      pageUrl = "https://open.spotify.com/track/0VjIjW4GlUZAMYd2vXMi3b",
+      html = spotifyHtml,
+      resolveYouTubeId = { query ->
+        assertEquals("The Weeknd - Blinding Lights audio", query)
+        "4NRXx6U8ABQ"
+      },
+    )
+    assertEquals("The Weeknd - Blinding Lights", spExtracted.title)
+    assertEquals("The Weeknd", spExtracted.uploader)
+    assertEquals("https://i.scdn.co/image/ab67616d0000b2738863bc11d2aa12b54f5aeb36", spExtracted.thumbnail)
+    assertEquals(200L, spExtracted.durationSec)
+    assertEquals("https://www.youtube.com/watch?v=4NRXx6U8ABQ", spExtracted.audioUrl)
+
+    // 3. Container-safe ID3v2 guard: never shift byte-0 offsets of raw WebM (0x1A45DFA3) or un-demuxed MP4 (ftyp),
+    // while tagging ADTS AAC (0xFF 0xF1) streams cleanly.
+    val webmBytes = byteArrayOf(0x1A, 0x45, 0xDF.toByte(), 0xA3.toByte(), 1, 2, 3, 4, 5, 6)
+    val tmpWebm = File.createTempFile("qa_webm_guard_", ".webm")
+    val adtsBytes = byteArrayOf(0xFF.toByte(), 0xF1.toByte(), 0x50, 0x80.toByte(), 0x02, 0x1F, 0xFC.toByte(), 0xAA.toByte(), 0xBB.toByte())
+    val tmpAdts = File.createTempFile("qa_adts_tag_", ".mp3")
+    try {
+      tmpWebm.writeBytes(webmBytes)
+      assertTrue(NewPipeEngine.isWebmOrOggContainer(tmpWebm))
+      assertFalse(
+        NewPipeEngine.embedId3v2CoverAndMetadata(
+          audioFile = tmpWebm,
+          title = "WebM Track",
+          artist = "Artist",
+          album = "Album",
+          coverBytes = byteArrayOf(1, 2, 3),
+        )
+      )
+      // WebM byte 0 must remain untouched
+      assertArrayEquals(webmBytes, tmpWebm.readBytes())
+
+      tmpAdts.writeBytes(adtsBytes)
+      assertFalse(NewPipeEngine.isMp4Container(tmpAdts))
+      assertFalse(NewPipeEngine.isWebmOrOggContainer(tmpAdts))
+      assertTrue(
+        NewPipeEngine.embedId3v2CoverAndMetadata(
+          audioFile = tmpAdts,
+          title = "ADTS Track",
+          artist = "Artist",
+          album = "Album",
+          coverBytes = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 0xD9.toByte()),
+        )
+      )
+      val taggedAdts = tmpAdts.readBytes()
+      assertEquals('I'.code.toByte(), taggedAdts[0])
+      assertEquals('D'.code.toByte(), taggedAdts[1])
+      assertEquals('3'.code.toByte(), taggedAdts[2])
+    } finally {
+      tmpWebm.delete()
+      tmpAdts.delete()
     }
   }
 }
